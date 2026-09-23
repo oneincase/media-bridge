@@ -1,0 +1,85 @@
+[package]
+name = "media-bridge"
+description = "跨平台系统媒体中间件：正在播放元数据/封面/歌词 + 系统音频采集 + 反向传输控制（macOS / Windows / Linux）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords = ["nowplaying", "mpris", "gsmtc", "mediaremote", "audio-capture"]
+categories = ["multimedia", "api-bindings"]
+
+[lib]
+name = "media_bridge"
+path = "src/lib.rs"
+
+[[bin]]
+name = "media-bridge"
+path = "src/main.rs"
+
+[features]
+default = ["http", "audio"]
+# 本地 HTTP / SSE / WebSocket 服务（多消费者接入用；stdio 模式不需要）
+http = ["dep:axum", "dep:tokio-stream", "dep:futures-util"]
+# 系统音频采集（64 段频谱 + 原始 PCM）
+audio = []
+# 从本地音频文件读内嵌标签（标题/封面/内嵌歌词）—— 仅在能拿到本地文件路径时有意义
+embedded = ["dep:lofty"]
+# 在线歌词（LRCLIB，免费无鉴权）
+online = ["dep:ureq"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+rustfft.workspace = true
+dirs.workspace = true
+
+axum = { version = "0.8", optional = true, features = ["ws"] }
+tokio-stream = { version = "0.1", optional = true, features = ["sync"] }
+futures-util = { version = "0.3", optional = true }
+# 注意：lofty 0.25 在 `default-features = false` 时自身编译不过（它的
+# id3v2 压缩帧错误类型只在该 feature 下定义，但引用它的代码没被 cfg 掉）。
+# 默认 feature 只多带一个 flate2，保持默认即可。
+lofty = { version = "0.25", optional = true }
+# `json` feature 才提供 Body::read_json
+ureq = { version = "3", optional = true, features = ["json"] }
+
+# ── macOS：MediaRemote（正在播放/传输控制）+ CoreAudio 进程 tap（系统音频）──
+# 只用 objc2/block2 两个 crate：ObjC 运行时（CATapDescription）与 block ABI（回调）
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+
+# ── Linux：MPRIS over D-Bus ────────────────────────────────────────────────
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+# ── Windows：GSMTC（正在播放/传输控制）+ WASAPI loopback（系统音频）────────
+# 只开真正用到的 feature：WinRT 的 Media/Storage 与 Win32 的 WASAPI/COM
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+  "Foundation",
+  "Foundation_Collections",
+  "Media",
+  "Media_Control",
+  "Storage",
+  "Storage_Streams",
+  "Win32_Foundation",
+  "Win32_Media_Audio",
+  "Win32_System_Com",
+  # IMMDevice::Activate 的签名里带 PROPVARIANT，所以这两个 feature 是必需的
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Variant",
+  "Win32_System_WinRT",
+] }
+windows-future = "0.3"
+# WinRT 的集合类型（IVectorView 等）在独立 crate 里，windows 只是间接依赖它
+windows-collections = "0.3.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }

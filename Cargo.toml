@@ -1,0 +1,35 @@
+[workspace]
+members = ["crates/media-bridge"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+authors = ["oneincase"]
+repository = "https://github.com/oneincase/media-bridge"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "time",
+  "sync",
+  "io-util",
+  "io-std",
+  "net",
+  "signal",
+] }
+anyhow = "1"
+thiserror = "2"
+base64 = "0.23"
+rustfft = "6"
+dirs = "7"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
