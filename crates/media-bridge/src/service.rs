@@ -148,6 +148,12 @@ pub struct ControlReport {
 
 struct State {
     now: NowPlaying,
+    /// 上次发出去的「数据源状态」指纹（用来只在**变化时**推 status 事件）。
+    /// 此前 status 事件只在元数据源报错时发，音频源 idle→preparing→running 的变化
+    /// 一个都不发 —— 消费端（如 dsh-wallpaper-engine）只在启动时读一次 status，
+    /// 于是永远停在 preparing：频谱明明已经有数据，界面却显示未就绪（2026-09-23
+    /// 在 Ubuntu 24.04 + PipeWire 上实测到）。
+    status_fp: String,
     metadata: SourceStatus,
     last_track_id: String,
     /// 已为哪首曲目发起过**在线**歌词查询（本地查询每轮都做，不需要标记）
@@ -208,6 +214,7 @@ impl MediaBridge {
             audio,
             state: RwLock::new(State {
                 now: NowPlaying::empty(now_ms()),
+                status_fp: String::new(),
                 metadata,
                 last_track_id: String::new(),
                 online_requested_for: String::new(),
@@ -449,10 +456,27 @@ impl MediaBridge {
                 if let Ok(mut g) = self.state.write() {
                     g.metadata = self.session.status();
                 }
-                let status = self.status();
-                let _ = self.events.send(Event::Status { status });
                 // 数据源出问题时也开一个短突发窗口，尽快恢复
                 self.burst_until.store(now_ms() + 2000, Ordering::Relaxed);
+            }
+            // 状态**变化**就推一条 status（含音频源从 idle→preparing→running 这类迁移）。
+            // 指纹用序列化后的 sources：每秒一次的小字符串比较，代价可忽略。
+            let status = self.status();
+            let fp = serde_json::to_string(&status.sources).unwrap_or_default();
+            let changed = self
+                .state
+                .write()
+                .map(|mut g| {
+                    if g.status_fp == fp {
+                        false
+                    } else {
+                        g.status_fp = fp;
+                        true
+                    }
+                })
+                .unwrap_or(false);
+            if changed {
+                let _ = self.events.send(Event::Status { status });
             }
             let wait = self.effective_poll_ms().clamp(50, 10_000);
             tokio::time::sleep(Duration::from_millis(wait)).await;
