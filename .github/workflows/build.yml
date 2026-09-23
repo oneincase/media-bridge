@@ -97,7 +97,6 @@ jobs:
       matrix:
         include:
           - { runner: windows-latest, target: x86_64-pc-windows-msvc,  name: win32-x64 }
-          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc,  name: win32-arm64 }
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -126,6 +125,45 @@ jobs:
         with:
           name: media-bridge-${{ matrix.name }}.exe
           path: dist/media-bridge-${{ matrix.name }}.exe
+          if-no-files-found: error
+
+  # ── 3b. Windows ARM64：**可选**产物 ────────────────────────────────────
+  # 为什么不放进发布依赖链：`windows-11-arm` runner 实测会长时间卡在收尾步骤
+  # （2026-09-23 实测：同一 job 25 分钟无进展，取消重跑后又卡在同一个 job），
+  # 而 x64 产物在 Windows ARM64 上能直接跑（系统自带模拟），所以它不该挡住发布。
+  # 这里给它 25 分钟上限、允许失败；跑成功了再由下面的 attach 任务补传到 Release。
+  build-win32-arm64:
+    name: build (win32-arm64, 可选)
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: windows-11-arm
+    continue-on-error: true
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: 构建
+        shell: bash
+        run: cargo build --locked --release --features "$FEATURES" --target aarch64-pc-windows-msvc
+      - name: 冒烟测试产物
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/aarch64-pc-windows-msvc/release/media-bridge.exe dist/media-bridge-win32-arm64.exe
+          ./dist/media-bridge-win32-arm64.exe version
+          ./dist/media-bridge-win32-arm64.exe diagnose || true
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            v=$(./dist/media-bridge-win32-arm64.exe version | head -1 | awk '{print $2}')
+            [ "$v" = "${GITHUB_REF_NAME#v}" ] || { echo "版本不一致：二进制 $v vs 标签 $GITHUB_REF_NAME"; exit 1; }
+            echo "版本一致：$v"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-bridge-win32-arm64.exe
+          path: dist/media-bridge-win32-arm64.exe
           if-no-files-found: error
 
   # ── 4. Linux：x64 / arm64（glibc 2.35 基线）+ x64 静态（任何发行版都能跑）──
@@ -218,8 +256,10 @@ jobs:
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
           # 只对**二进制产物**查体积下限（>1000 字节 = 不是错误页）；SHA256SUMS 本身就是
           # 几百字节的文本清单，套同一条阈值必然误报（实测 558 字节 → "产物大小异常"）。
-          for f in media-bridge-darwin-universal media-bridge-linux-x64 media-bridge-linux-arm64 \
-                   media-bridge-linux-x64-musl media-bridge-win32-x64.exe media-bridge-win32-arm64.exe; do
+          # win32-arm64 是可选产物（见 build-win32-arm64 的说明）：有就查，没有只提醒
+          REQUIRED="media-bridge-darwin-universal media-bridge-linux-x64 media-bridge-linux-arm64 \
+                    media-bridge-linux-x64-musl media-bridge-win32-x64.exe"
+          for f in $REQUIRED; do
             code=$(curl -sIL -o /dev/null -w '%{http_code}' "$base/$f")
             # tr -d '\r'：HTTP 头是 CRLF，直接取 $2 会带上 \r 让整数比较报 "integer expression expected"
             size=$(curl -sIL "$base/$f" | tr -d '\r' | awk 'BEGIN{IGNORECASE=1} /^content-length/{l=$2} END{print l}')
@@ -227,10 +267,56 @@ jobs:
             [ "$code" = "200" ] || { echo "产物不可下载：$f"; exit 1; }
             [ "${size:-0}" -gt 1000 ] || { echo "产物大小异常：$f ($size)"; exit 1; }
           done
+          # 可选：win32-arm64（ARM runner 给力才有）
+          arm_code=$(curl -sIL -o /dev/null -w '%{http_code}' "$base/media-bridge-win32-arm64.exe")
+          printf '  %-34s HTTP %s（可选）\n' media-bridge-win32-arm64.exe "$arm_code"
           # 校验清单单独查：只要 HTTP 200 且非空
           sums_code=$(curl -sIL -o /dev/null -w '%{http_code}' "$base/SHA256SUMS")
           printf '  %-34s HTTP %s\n' SHA256SUMS "$sums_code"
           [ "$sums_code" = "200" ] || { echo "SHA256SUMS 不可下载"; exit 1; }
           sum_len=$(curl -sL "$base/SHA256SUMS" | wc -c | tr -d ' ')
           [ "$sum_len" -gt 200 ] || { echo "SHA256SUMS 内容异常（$sum_len 字节）"; exit 1; }
-          echo "7 个产物均可通过直链下载"
+          echo "必需产物均可通过直链下载（含可选产物时共 7 个）"
+
+  # ── 6. 可选的 win32-arm64：构建成功才补传到 Release ────────────────────────
+  # 依赖 [release, build-win32-arm64]：release 不等它（x64 够了），它跑完了再挂附件。
+  # 用「能不能下载到这个 artifact」判断成功与否，而不是 needs.*.result ——
+  # continue-on-error 的 job 在 needs 里可能仍报 success，靠 artifact 存在性更可靠。
+  attach-win32-arm64:
+    name: attach (win32-arm64, 可选)
+    needs: [build-win32-arm64, release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        id: dl
+        continue-on-error: true
+        with:
+          name: media-bridge-win32-arm64.exe
+          path: arm
+      - name: 补传到 Release（含把哈希补进 SHA256SUMS）
+        if: steps.dl.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la arm
+          gh release upload "${GITHUB_REF_NAME}" arm/* --clobber --repo "${GITHUB_REPOSITORY}"
+          # Release 那份 SHA256SUMS 是发布时生成的：若这个产物**晚到**，里面就没有它 ——
+          # 补一行上去，别让校验清单与附件对不上（文件名用与其它条目一致的裸名）。
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          curl -sL "$base/SHA256SUMS" -o sums.txt
+          if grep -q 'media-bridge-win32-arm64.exe' sums.txt; then
+            echo "SHA256SUMS 里已有 arm64 条目"
+          else
+            (cd arm && sha256sum media-bridge-win32-arm64.exe) >> sums.txt
+            gh release upload "${GITHUB_REF_NAME}" "sums.txt#SHA256SUMS" --clobber --repo "${GITHUB_REPOSITORY}"
+            echo "已把 arm64 条目补进 SHA256SUMS"
+          fi
+          code=$(curl -sIL -o /dev/null -w '%{http_code}' "$base/media-bridge-win32-arm64.exe")
+          echo "win32-arm64 直链 HTTP $code"
+          [ "$code" = "200" ] || { echo "补传后仍不可下载"; exit 1; }
+      - name: 没有产物就跳过
+        if: steps.dl.outcome != 'success'
+        run: echo "这次没构建出 win32-arm64（ARM runner 卡住或失败）—— Windows ARM64 用 win32-x64 产物即可（系统自带 x64 模拟）"

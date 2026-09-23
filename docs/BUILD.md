@@ -111,6 +111,11 @@ jobs:
         with: { name: media-bridge-darwin-universal, path: media-bridge-darwin-universal }
 ```
 
+> **可选 vs 必需**：`build-macos` / `build-windows`(x64) / `build-linux` 是发布依赖链（必需，
+> 挂了就不发）；`build-win32-arm64` 是可选 tail job（超时 25 分钟、`continue-on-error`，
+> 卡住或失败都不挡发布，成功才追加附件）。`ubuntu-22.04-arm`（linux-arm64）实测稳定，
+> 照旧放在必需里。
+>
 > runner 名字（`windows-11-arm`、`ubuntu-24.04-arm` 这类 ARM runner）在**公开仓库**里可用，
 > 但 GitHub 会调整可用列表 —— 用之前对一下
 > [官方 runner 文档](https://docs.github.com/actions/using-github-hosted-runners)。
@@ -133,7 +138,7 @@ jobs:
 |---|---|---|
 | `media-bridge-darwin-universal` | Mach-O **通用二进制**（x86_64 + arm64 两个切片） | 13.1 MB；已在 CI 里 `lipo -info` 核对两个切片都在 |
 | `media-bridge-win32-x64.exe` | PE32+ x86-64 | 7.7 MB；x64 与 ARM64 Windows 都能跑（后者靠系统模拟） |
-| `media-bridge-win32-arm64.exe` | PE32+ Aarch64 | 6.4 MB；原生 ARM64 |
+| `media-bridge-win32-arm64.exe` | PE32+ Aarch64 | 6.4 MB；原生 ARM64。**可选产物**：`windows-11-arm` runner 实测会长时间卡在收尾步骤（2026-09-23：同一 job 25 分钟无进展，取消重跑后又卡同一个），所以它**不参与发布依赖链** —— 单独一个带 25 分钟上限的 job，成功后再由 `attach-win32-arm64` 补传到 Release（并顺手把哈希补进 SHA256SUMS）。没有它时 Windows ARM64 用 x64 产物即可 |
 | `media-bridge-linux-x64` | ELF x86-64（动态） | 11.0 MB；需要 **glibc ≥ 2.34**（Ubuntu 22.04+ / Debian 12+ / RHEL 9+） |
 | `media-bridge-linux-arm64` | ELF aarch64（动态） | 9.7 MB；同样 glibc ≥ 2.34 |
 | `media-bridge-linux-x64-musl` | ELF x86-64 **static-pie** | 11.1 MB；**完全不依赖 glibc**，Alpine / 老发行版直接跑 |
