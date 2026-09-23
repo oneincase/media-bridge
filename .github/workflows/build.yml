@@ -216,8 +216,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          # 只对**二进制产物**查体积下限（>1000 字节 = 不是错误页）；SHA256SUMS 本身就是
+          # 几百字节的文本清单，套同一条阈值必然误报（实测 558 字节 → "产物大小异常"）。
           for f in media-bridge-darwin-universal media-bridge-linux-x64 media-bridge-linux-arm64 \
-                   media-bridge-linux-x64-musl media-bridge-win32-x64.exe media-bridge-win32-arm64.exe SHA256SUMS; do
+                   media-bridge-linux-x64-musl media-bridge-win32-x64.exe media-bridge-win32-arm64.exe; do
             code=$(curl -sIL -o /dev/null -w '%{http_code}' "$base/$f")
             # tr -d '\r'：HTTP 头是 CRLF，直接取 $2 会带上 \r 让整数比较报 "integer expression expected"
             size=$(curl -sIL "$base/$f" | tr -d '\r' | awk 'BEGIN{IGNORECASE=1} /^content-length/{l=$2} END{print l}')
@@ -225,4 +227,10 @@ jobs:
             [ "$code" = "200" ] || { echo "产物不可下载：$f"; exit 1; }
             [ "${size:-0}" -gt 1000 ] || { echo "产物大小异常：$f ($size)"; exit 1; }
           done
+          # 校验清单单独查：只要 HTTP 200 且非空
+          sums_code=$(curl -sIL -o /dev/null -w '%{http_code}' "$base/SHA256SUMS")
+          printf '  %-34s HTTP %s\n' SHA256SUMS "$sums_code"
+          [ "$sums_code" = "200" ] || { echo "SHA256SUMS 不可下载"; exit 1; }
+          sum_len=$(curl -sL "$base/SHA256SUMS" | wc -c | tr -d ' ')
+          [ "$sum_len" -gt 200 ] || { echo "SHA256SUMS 内容异常（$sum_len 字节）"; exit 1; }
           echo "7 个产物均可通过直链下载"
