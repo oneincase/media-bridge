@@ -1,9 +1,11 @@
 [workspace]
-members = ["crates/media-bridge"]
+members = ["crates/media-bridge", "crates/media-bridge-mac-helper"]
+# 裸 cargo build / cargo test 只动主 crate；helper 由 build.rs 需要时显式构建
+default-members = ["crates/media-bridge"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -30,6 +32,12 @@ rustfft = "6"
 dirs = "7"
 
 [profile.release]
+# cdylib 不能 strip：strip 之后的 Mach-O 在 macOS 27 的 dyld 上会报
+# 「mis-aligned LINKEDIT string pool」而被拒绝加载（helper 就是被 perl dlopen 的 cdylib）。
+# 只对这一个包关掉；主二进制的 strip 保持不变。
 opt-level = 3
 lto = "thin"
 strip = true
+
+[profile.release.package.media-bridge-mac-helper]
+strip = false

@@ -188,6 +188,21 @@ Tauri 打包的 `.app` / `.msi` / `.deb` 也各自按平台产出 —— **不�
 也就是说：**本项目确实需要按平台构建，但这份工作可以完全交给 CI 矩阵**；
 消费方（Tauri / Node 插件）各自按自己的惯例拿对应产物即可。
 
+### 5b. macOS：helper 要先建（权限通道）
+
+macOS 15.4 起 MediaRemote 只对「被授权」的进程返回数据，中间件必须借 `/usr/bin/perl`
+的身份去读（原理见 README 的「MediaRemote 权限通道」）。那个 helper 是个 cdylib，
+由 `crates/media-bridge/build.rs` **嵌进主二进制**（发布产物仍是单文件）。所以：
+
+```bash
+cargo build --release -p media-bridge-mac-helper   # 先
+cargo build --release                              # 后（build.rs 会找到并嵌入）
+```
+
+顺序反了**不会报错**，只是运行时退回「进程内直连」—— 在 macOS 15.4 以上读不到正在播放。
+判据：`media-bridge diagnose` 会打印当前走的是哪条通道。CI 的 darwin 任务已把两步都排好
+（两个 target 各建各自架构的 helper，通用二进制里每个切片嵌自己那一份）。
+
 ## 6. 为什么不能在别的平台上「顺带验证」
 
 一个具体的例子：`friendly_app_name()`（把 `Spotify.exe` 这类 AUMID 变成可读名字）只存在于

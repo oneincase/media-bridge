@@ -16,6 +16,9 @@ use crate::types::{
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
+/// macOS 15.4+ 的 MediaRemote 访问通道（借 /usr/bin/perl 身份读，见该文件头）
+#[cfg(target_os = "macos")]
+pub mod macos_helper;
 pub mod mock;
 #[cfg(target_os = "windows")]
 pub mod windows;

@@ -54,6 +54,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: 构建两个切片
         run: |
+          # 先建 helper（macOS 15.4+ 的 MediaRemote 权限通道，会被嵌进主二进制；
+          # 两个切片各嵌各自架构的那一份，所以两个 target 都要先建）
+          cargo build --locked --release -p media-bridge-mac-helper --target aarch64-apple-darwin
+          cargo build --locked --release -p media-bridge-mac-helper --target x86_64-apple-darwin
           cargo build --locked --release --features "$FEATURES" --target aarch64-apple-darwin
           cargo build --locked --release --features "$FEATURES" --target x86_64-apple-darwin
       - name: 合成通用二进制并核对

@@ -209,6 +209,24 @@ println!("{:?}", frame.bands);
 | 倍速写入 | 不提供 | 支持 | 支持 |
 | 本地文件路径 | 拿不到 | 拿不到 | 能拿到（`xesam:url`）→ 内嵌标签可用 |
 
+### macOS 15.4+ 的 MediaRemote 权限通道（重要）
+
+从 macOS 15.4 起，MediaRemote 私有框架**只对「被授权」的进程返回数据** —— 第三方进程
+直接调用会拿到空字典：符号全部就绪、`diagnose` 也显示「已加载」，但一个键都读不到，
+症状是**「明明在放歌，却 hasMedia=false」**。这不是本项目的 bug，而是系统收紧了访问。
+
+因此中间件在 macOS 上走**权限通道**：把一个小动态库（`crates/media-bridge-mac-helper`）
+嵌进主二进制，运行时落盘，再由 `/usr/bin/perl`（Apple 自带二进制，守护进程认它的
+bundle id 是 `com.apple.*`）加载并代读 —— MediaRemote 的调用发生在 perl 进程里。
+同类工具（media-control / MediaRemoteAdapter）用的是同一套办法。
+
+- 判据：`media-bridge diagnose` 会打印「权限通道：经 /usr/bin/perl 读 MediaRemote」；
+  走直连时也会明确写出来。
+- 代价：每次读取多一次 perl 进程启动（实测单次往返约 30ms，1s 轮询下可忽略）。
+- 发布产物仍然是**单文件**（helper 已嵌进去），消费方不用多下载东西。
+- 自行构建时先建 helper 再建主二进制：`cargo build -p media-bridge-mac-helper --release`
+  然后 `cargo build --release`（顺序反了也不报错，只是运行时退回直连，`diagnose` 会说明）。
+
 **刻意不提供的功能**（宁可明确报「不支持」，也不给一个猜的语义）：
 
 - macOS 的音量/静音/倍速：MediaRemote 对应的私有接口是 per-origin 语义、且没有可靠的回读校验手段

@@ -1,0 +1,24 @@
+[package]
+name = "media-bridge-mac-helper"
+description = "macOS 专用：被 /usr/bin/perl 加载后读取 MediaRemote 的 now-playing（macOS 15.4+ 只有「被授权」的进程能读，见 lib.rs 的说明）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "media_bridge_mac_helper"
+path = "src/lib.rs"
+# 只产出动态库：它由 /usr/bin/perl 用 DynaLoader 加载，不作为依赖被链接
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json.workspace = true
+
+# block ABI：与主 crate 的 macOS 实现同一套依赖（Objective-C 运行时 + block）。
+# 只在 macOS 上编（本 crate 在别的平台上整体是空的，见 lib.rs 的 crate 级 cfg）。
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"

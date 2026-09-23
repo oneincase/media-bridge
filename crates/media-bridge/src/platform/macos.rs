@@ -60,6 +60,8 @@ struct Api {
     set_elapsed_time: usize,
     set_repeat_mode: usize,
     set_shuffle_mode: usize,
+    /// 注册成 now-playing 客户端。macOS 26 上**不注册就查不到数据**（见 ensure_registered）
+    register: usize,
 }
 
 impl Api {
@@ -269,6 +271,12 @@ struct Inner {
     api: OnceLock<Option<Api>>,
     keys: OnceLock<Keys>,
     queue: OnceLock<SendPtr>,
+    /// 是否已注册成 now-playing 客户端（只注册一次；见 `ensure_registered`）
+    registered: OnceLock<()>,
+    /// 上一轮看到的曲目标识（helper 路径用它判断「换曲了没」）
+    last_track_id: Mutex<String>,
+    /// 已经取过封面的曲目标识（换曲才重新取一次封面）
+    artwork_for: RwLock<String>,
     /// 串行化 block 调用：一次只等一个回执（同时复用同一条队列）
     ctrl: Mutex<()>,
     /// 应用名/PID 缓存：只在换应用时刷新（每次轮询多问两次 MediaRemote 没必要）
@@ -291,6 +299,9 @@ impl MacSession {
                 api: OnceLock::new(),
                 keys: OnceLock::new(),
                 queue: OnceLock::new(),
+                registered: OnceLock::new(),
+                last_track_id: Mutex::new(String::new()),
+                artwork_for: RwLock::new(String::new()),
                 ctrl: Mutex::new(()),
                 app: RwLock::new(AppCache::default()),
                 commands_sent: AtomicU64::new(0),
@@ -304,7 +315,12 @@ impl MacSession {
             Some(api) if api.all_present() => SourceStatus::new(
                 "metadata",
                 SourceState::Running,
-                "MediaRemote（系统级正在播放）",
+                if super::macos_helper::available() {
+                    // macOS 15.4 起只有被授权进程读得到，这里是借 /usr/bin/perl 的身份
+                    "MediaRemote（系统级正在播放，经 /usr/bin/perl 权限通道）"
+                } else {
+                    "MediaRemote（系统级正在播放，进程内直连）"
+                },
             ),
             Some(_) => SourceStatus::new(
                 "metadata",
@@ -333,6 +349,15 @@ impl MacSession {
         if api.is_none() {
             return out;
         }
+        out.push(if super::macos_helper::available() {
+            "权限通道：经 /usr/bin/perl 读 MediaRemote（macOS 15.4+ 必需）".to_string()
+        } else if super::macos_helper::embedded() {
+            "权限通道：未启用（本机没有 /usr/bin/perl）—— macOS 15.4+ 会读不到正在播放"
+                .to_string()
+        } else {
+            "权限通道：未编入本产物（构建时未嵌入 helper）—— macOS 15.4+ 会读不到正在播放"
+                .to_string()
+        });
         let keys = self.inner.keys();
         let found = [
             keys.title,
@@ -384,7 +409,40 @@ impl MacSession {
     }
 
     /// 同步取一次快照（内部会等 MediaRemote 的 block 回执）。
+    ///
+    /// 首选**借 `/usr/bin/perl` 身份的 helper**（macOS 15.4 起只有被授权进程读得到，
+    /// 见 `platform::macos_helper`）；helper 不可用/读失败时退回本进程直连 ——
+    /// 直连在 15.4 以下是正确路径，在 15.4 以上只会拿到空字典（那时 status 会说明原因）。
     pub fn snapshot_blocking(&self) -> Result<RawNowPlaying> {
+        let now = now_ms();
+        if super::macos_helper::available() {
+            // 封面只在「换曲那一拍」取：封面动辄几百 KB，例行轮询不该每秒搬一次；
+            // service 层的「永不降级」会保留同一首的上一张封面。
+            let last = self.inner.last_track_id.lock().map(|t| t.clone()).unwrap_or_default();
+            let fetched = self.inner.artwork_for.read().unwrap_or_else(|e| e.into_inner()).clone();
+            let with_artwork = last.is_empty() || fetched != last;
+            match super::macos_helper::snapshot_blocking(with_artwork, now) {
+                Ok(raw) => {
+                    let id = raw.track_id().to_string();
+                    if !id.is_empty() {
+                        if with_artwork && raw.artwork_raw.is_some() {
+                            if let Ok(mut w) = self.inner.artwork_for.write() {
+                                *w = id.clone();
+                            }
+                        }
+                        if let Ok(mut t) = self.inner.last_track_id.lock() {
+                            *t = id;
+                        }
+                    }
+                    return Ok(raw);
+                }
+                Err(_) => {
+                    // helper 这一轮失败（被系统临时拒了 / perl 不在 / 落盘失败…）：
+                    // 不报错，交给下面的直连路径兜底 —— 它在 15.4 以下是对的，
+                    // 在 15.4 以上会返回空快照（与「没有媒体」同形，status 里另有说明）。
+                }
+            }
+        }
         let api = self
             .inner
             .api()
@@ -392,6 +450,8 @@ impl MacSession {
         if !api.all_present() {
             return Err(BridgeError::unavailable("MediaRemote 缺少 MRMediaRemoteGetNowPlayingInfo"));
         }
+        // 必须先注册成客户端（对老系统上是充分条件；macOS 15.4+ 靠下面的 helper 路径）
+        self.inner.ensure_registered();
         let now = now_ms();
         let keys = self.inner.keys();
 
@@ -743,6 +803,8 @@ impl MacSession {
         pick: impl Fn(&ParsedDict) -> Option<T> + Send + 'static,
     ) -> Option<T> {
         let api = self.inner.api()?;
+        // 与 snapshot_blocking 同一条前提：没注册成客户端就查不到（见 ensure_registered）
+        self.inner.ensure_registered();
         let keys = self.inner.keys();
         self.inner
             .call_dict(api.get_now_playing_info, move |dict| {
@@ -769,7 +831,7 @@ fn control_result(action: &str, sent: bool) -> ControlOutcome {
 }
 
 /// `MPRepeatType` 原始值 → 语义（依据 `MPRemoteControlTypes.h` 的枚举顺序）。
-fn repeat_raw_to_loop(raw: i64) -> LoopMode {
+pub(crate) fn repeat_raw_to_loop(raw: i64) -> LoopMode {
     match raw {
         0 => LoopMode::Off,
         1 => LoopMode::Track,
@@ -1013,6 +1075,32 @@ impl Inner {
         p.get::<c_void>() as *mut c_void
     }
 
+    /// 注册成 MediaRemote 的 now-playing 客户端（+ 一次预热读取），进程内只做一次。
+    ///
+    /// **为什么必须注册**：macOS 26 上 `MRMediaRemoteGetNowPlayingInfo` 只对注册过的
+    /// 客户端返回数据。不注册时它会回一个空字典 —— 表现就是「明明在放歌，中间件却报
+    /// hasMedia=false」，而 App 侧看不出任何异常（`diagnose` 里「MediaRemote 已加载、
+    /// NowPlayingInfo 键 8/8 可用」全部正常）。实测对照：同机上 `media-control`
+    /// （MediaRemoteAdapter）用的是**同一组**读取接口，差别仅仅是它先调了这个注册；
+    /// 汽水音乐（com.soda.music）在播时，未注册查询一个键都拿不到。
+    ///
+    /// 预热那一次读取是给 one-shot 场景用的：注册后守护进程要一拍才把本进程认成客户端，
+    /// 紧接着的第一次读取往往还是空的。丢掉这一次的结果，让调用方真正的读取拿到数据，
+    /// 否则 `media-bridge now` 这种一次性命令永远看到「没有媒体」。
+    fn ensure_registered(&self) {
+        self.registered.get_or_init(|| {
+            let Some(api) = self.api() else { return };
+            if api.register == 0 {
+                return;
+            }
+            let f: unsafe extern "C" fn(*mut c_void) = unsafe { std::mem::transmute(api.register) };
+            unsafe { f(self.queue()) };
+            if api.get_now_playing_info != 0 {
+                let _ = mr_call!(self, api.get_now_playing_info, *const c_void, |_v| ());
+            }
+        });
+    }
+
     fn call_dict<T: Send + 'static>(
         &self,
         addr: usize,
@@ -1104,6 +1192,7 @@ fn load_api() -> Option<Api> {
         set_elapsed_time: sym("MRMediaRemoteSetElapsedTime"),
         set_repeat_mode: sym("MRMediaRemoteSetRepeatMode"),
         set_shuffle_mode: sym("MRMediaRemoteSetShuffleMode"),
+        register: sym("MRMediaRemoteRegisterForNowPlayingNotifications"),
     };
     if api.all_present() {
         Some(api)
