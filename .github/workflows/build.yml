@@ -1,0 +1,183 @@
+name: build
+
+# 触发方式
+#   push 到 main   → 跑测试 + 构建全部产物（public 仓库不消耗额度）
+#   打 v* 标签      → 同上，并把产物发到 GitHub Release
+#   Pull Request   → 只跑测试（不占构建时间）
+#   手动 dispatch   → 跑测试 + 构建产物
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# 产物里带上这些 feature：本地歌词/内嵌标签 + 在线歌词/远端封面
+env:
+  CARGO_TERM_COLOR: always
+  FEATURES: embedded,online
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 1. 三平台测试 ──────────────────────────────────────────────────────
+  # 为什么先跑测试：这个项目的平台后端是 cfg 门控的，**同一个平台编过的代码在别的
+  # 平台上根本不编译** —— 只做「本机测试 + 交叉编译检查」会漏掉平台专属 bug
+  # （实测漏过一个 AUMID 解析顺序 bug 和一个 tokio 运行时 panic）。
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --features ${{ env.FEATURES }}
+
+  # ── 2. macOS：x64 + arm64 两个切片合成一个通用二进制 ─────────────────────
+  # 在 arm64 runner 上交叉编出 x86_64 切片（同一个 SDK，可靠），避免依赖 Intel runner。
+  build-macos:
+    name: build (darwin-universal)
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: 构建两个切片
+        run: |
+          cargo build --locked --release --features "$FEATURES" --target aarch64-apple-darwin
+          cargo build --locked --release --features "$FEATURES" --target x86_64-apple-darwin
+      - name: 合成通用二进制并核对
+        run: |
+          mkdir -p dist
+          lipo -create \
+            target/aarch64-apple-darwin/release/media-bridge \
+            target/x86_64-apple-darwin/release/media-bridge \
+            -output dist/media-bridge-darwin-universal
+          # lipo 输入路径写错时不会报错、只会少一个切片 —— 必须核对
+          lipo -info dist/media-bridge-darwin-universal
+          for arch in arm64 x86_64; do
+            lipo -info dist/media-bridge-darwin-universal | grep -q "$arch" \
+              || { echo "缺少 $arch 切片"; exit 1; }
+          done
+          arch -arm64  dist/media-bridge-darwin-universal version
+          arch -x86_64 dist/media-bridge-darwin-universal version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-bridge-darwin-universal
+          path: dist/media-bridge-darwin-universal
+          if-no-files-found: error
+
+  # ── 3. Windows：x64（覆盖 x64 与 ARM64，后者跑模拟）+ 原生 ARM64 ──────────
+  build-windows:
+    name: build (${{ matrix.name }})
+    needs: test
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc,  name: win32-x64 }
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc,  name: win32-arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: 构建
+        shell: bash
+        run: |
+          cargo build --locked --release --features "$FEATURES" --target ${{ matrix.target }}
+      - name: 冒烟测试产物
+        shell: bash
+        run: |
+          mkdir -p dist
+          bin="target/${{ matrix.target }}/release/media-bridge.exe"
+          cp "$bin" "dist/media-bridge-${{ matrix.name }}.exe"
+          "./dist/media-bridge-${{ matrix.name }}.exe" version
+          "./dist/media-bridge-${{ matrix.name }}.exe" diagnose || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-bridge-${{ matrix.name }}.exe
+          path: dist/media-bridge-${{ matrix.name }}.exe
+          if-no-files-found: error
+
+  # ── 4. Linux：x64 / arm64（glibc 2.35 基线）+ x64 静态（任何发行版都能跑）──
+  build-linux:
+    name: build (${{ matrix.name }})
+    needs: test
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 在**较老**的发行版上构建 x64：产物的 glibc 需求跟着构建机走，越老越通用
+          - { runner: ubuntu-22.04,    target: x86_64-unknown-linux-gnu,  name: linux-x64,     musl: false }
+          - { runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, name: linux-arm64,   musl: false }
+          # musl 静态：不依赖 glibc，Alpine/老发行版也能直接跑
+          - { runner: ubuntu-22.04,    target: x86_64-unknown-linux-musl, name: linux-x64-musl, musl: true }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: 安装 musl 工具链（仅静态构建需要）
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+      - name: 构建
+        run: cargo build --locked --release --features "$FEATURES" --target ${{ matrix.target }}
+      - name: 冒烟测试产物
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/media-bridge" "dist/media-bridge-${{ matrix.name }}"
+          "./dist/media-bridge-${{ matrix.name }}" version
+          "./dist/media-bridge-${{ matrix.name }}" diagnose || true
+          # 记录 glibc 依赖，便于判断产物能在多老的发行版上跑
+          ldd "./dist/media-bridge-${{ matrix.name }}" 2>/dev/null | grep -E 'GLIBC_[0-9.]+' -o | sort -u -V | tail -3 || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-bridge-${{ matrix.name }}
+          path: dist/media-bridge-${{ matrix.name }}
+          if-no-files-found: error
+
+  # ── 5. 打标签时把产物发到 Release（带校验和）────────────────────────────
+  release:
+    name: release
+    needs: [build-macos, build-windows, build-linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: 生成校验和
+        run: |
+          cd artifacts
+          ls -la
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+      - name: 创建 Release 并上传产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            artifacts/*
