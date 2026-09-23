@@ -204,11 +204,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${GITHUB_REF_NAME}" artifacts/* --clobber --repo "${GITHUB_REPOSITORY}"
-      - name: 校验附件（数量 + 校验和文件）
+      # 校验用**用户实际下载的那条路**（Release 直链），而不是 REST API 的 assets 字段：
+      # 后者在某些新建 Release 上会返回空数组（实测踩到），而页面与直链其实都是好的 ——
+      # 拿 API 当验收标准会既误报又误导排查。
+      - name: 校验产物可下载（直链 HTTP 200）
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          n=$(gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets | length')
-          echo "附件数：$n"
-          gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[] | "  \(.name)\t\(.size)"'
-          [ "$n" -ge 7 ] || { echo "附件数不足（期望 6 个平台产物 + SHA256SUMS）"; exit 1; }
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          for f in media-bridge-darwin-universal media-bridge-linux-x64 media-bridge-linux-arm64 \
+                   media-bridge-linux-x64-musl media-bridge-win32-x64.exe media-bridge-win32-arm64.exe SHA256SUMS; do
+            code=$(curl -sIL -o /dev/null -w '%{http_code}' "$base/$f")
+            size=$(curl -sIL "$base/$f" | awk 'BEGIN{IGNORECASE=1} /^content-length/{l=$2} END{print l}')
+            printf '  %-34s HTTP %s  %s bytes\n' "$f" "$code" "$size"
+            [ "$code" = "200" ] || { echo "产物不可下载：$f"; exit 1; }
+            [ "${size:-0}" -gt 1000 ] || { echo "产物大小异常：$f ($size)"; exit 1; }
+          done
+          echo "7 个产物均可通过直链下载"

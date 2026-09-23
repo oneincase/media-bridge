@@ -138,14 +138,23 @@ jobs:
 | `media-bridge-linux-arm64` | ELF aarch64（动态） | 9.7 MB；同样 glibc ≥ 2.34 |
 | `media-bridge-linux-x64-musl` | ELF x86-64 **static-pie** | 11.1 MB；**完全不依赖 glibc**，Alpine / 老发行版直接跑 |
 
-取产物：
+取产物（两条路都行，推荐第一条）：
 
 ```bash
-# 从 Release（推荐，长期可下载）
-gh release download v0.1.0 -R oneincase/media-bridge
-# 或直接从某次 CI 运行里取
+# 1) 从 Release 直链下载（最稳，也是脚本里最好用的形式）
+curl -LO https://github.com/oneincase/media-bridge/releases/download/v0.1.1/media-bridge-darwin-universal
+curl -LO https://github.com/oneincase/media-bridge/releases/download/v0.1.1/SHA256SUMS
+shasum -a 256 -c SHA256SUMS
+
+# 2) 从 CI 运行里取（产物保留 90 天）
 gh run download <run-id> -R oneincase/media-bridge
 ```
+
+> **`gh release download` 的一个坑**：它走的是 REST API 里 release 对象的 `assets` 字段，
+> 而这个字段在部分新建 Release 上会返回空数组（实测踩到：网页版能正常列出 7 个附件、
+> 直链也能下载，但 `gh release view --json assets` / `gh release download` 报「没有附件」）。
+> 所以 **CI 的发布验收改成按直链校验**（逐个 curl 到 HTTP 200 + 体积检查），
+> 而不是查那个字段 —— 拿它当验收标准会既误报、又误导排查。
 
 CI 里每个产物构建完都会在**自己的原生 runner 上冒烟测试**（`version` + `diagnose`），
 macOS 那个还会强制核对两个切片都在 —— 产物是「跑过一遍的」而不是「编译出来就发的」。
