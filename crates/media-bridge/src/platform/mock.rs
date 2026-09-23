@@ -504,7 +504,10 @@ mod tests {
         assert!(out.applied);
         let pos = s.snapshot().await.unwrap().now.playback.position_ms;
         assert!((42_000..44_000).contains(&pos), "12s + 30s 应约等于 42s，实际 {pos}");
-        // 快退到负值应夹到 0
+        // 快退到负值应夹到 0。
+        // 先暂停再断言：位置在播放中会从锚点外推，夹到 0 之后过 1ms 就会读到 1
+        // —— 直接断言 == 0 会随机器快慢偶发失败（CI 上就抓到过）。
+        s.control(TransportCommand::Pause).await.unwrap();
         s.control(TransportCommand::SeekBy { delta_ms: -999_999 }).await.unwrap();
         assert_eq!(s.snapshot().await.unwrap().now.playback.position_ms, 0);
     }
