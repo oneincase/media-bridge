@@ -155,7 +155,9 @@ let frame = bridge.spectrum();
 println!("{:?}", frame.bands);
 ```
 
-详细的接入说明（含替换现有实现的具体映射）见 [`docs/INTEGRATION.md`](docs/INTEGRATION.md)。
+接入细节（含替换现有实现的具体映射、Node/Tauri/浏览器的完整示例）见
+[`docs/INTEGRATION.md`](docs/INTEGRATION.md)；**构建与分发（每个平台要不要单独构建、CI 矩阵、通用二进制）**
+见 [`docs/BUILD.md`](docs/BUILD.md)。
 
 ## 协议速查
 
@@ -217,6 +219,10 @@ println!("{:?}", frame.bands);
 三平台的差异细节、依赖与权限路径、以及**每项能力的验证状态**见 [`docs/PLATFORM.md`](docs/PLATFORM.md)。
 
 ## 构建与测试
+
+> 关于「不同系统 / x64 / arm 是不是都要单独构建」这个问题，
+> 以及 CI 矩阵、macOS 通用二进制（x64+arm64 合一）、交叉编译可行性，
+> 见 **[`docs/BUILD.md`](docs/BUILD.md)**。
 
 ```bash
 cargo build --release                     # 默认：http + audio
