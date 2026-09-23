@@ -71,6 +71,12 @@ jobs:
           done
           arch -arm64  dist/media-bridge-darwin-universal version
           arch -x86_64 dist/media-bridge-darwin-universal version
+          # 打标签发布时，二进制自报的版本必须等于标签（防止「忘了改 Cargo.toml 就发版」）
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            v=$(arch -arm64 dist/media-bridge-darwin-universal version | head -1 | awk '{print $2}')
+            [ "$v" = "${GITHUB_REF_NAME#v}" ] || { echo "版本不一致：二进制 $v vs 标签 $GITHUB_REF_NAME"; exit 1; }
+            echo "版本一致：$v"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: media-bridge-darwin-universal
@@ -107,6 +113,11 @@ jobs:
           cp "$bin" "dist/media-bridge-${{ matrix.name }}.exe"
           "./dist/media-bridge-${{ matrix.name }}.exe" version
           "./dist/media-bridge-${{ matrix.name }}.exe" diagnose || true
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            v=$("./dist/media-bridge-${{ matrix.name }}.exe" version | head -1 | awk '{print $2}')
+            [ "$v" = "${GITHUB_REF_NAME#v}" ] || { echo "版本不一致：二进制 $v vs 标签 $GITHUB_REF_NAME"; exit 1; }
+            echo "版本一致：$v"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: media-bridge-${{ matrix.name }}.exe
@@ -145,6 +156,11 @@ jobs:
           cp "target/${{ matrix.target }}/release/media-bridge" "dist/media-bridge-${{ matrix.name }}"
           "./dist/media-bridge-${{ matrix.name }}" version
           "./dist/media-bridge-${{ matrix.name }}" diagnose || true
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            v=$("./dist/media-bridge-${{ matrix.name }}" version | head -1 | awk '{print $2}')
+            [ "$v" = "${GITHUB_REF_NAME#v}" ] || { echo "版本不一致：二进制 $v vs 标签 $GITHUB_REF_NAME"; exit 1; }
+            echo "版本一致：$v"
+          fi
           # 记录 glibc 依赖，便于判断产物能在多老的发行版上跑
           ldd "./dist/media-bridge-${{ matrix.name }}" 2>/dev/null | grep -E 'GLIBC_[0-9.]+' -o | sort -u -V | tail -3 || true
       - uses: actions/upload-artifact@v4
