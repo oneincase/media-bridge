@@ -172,12 +172,27 @@ jobs:
           ls -la
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
-      - name: 创建 Release 并上传产物
+      # 两步（先建 Release、再上传附件）+ 末尾自校验。
+      # 一次写成 `gh release create <tag> files...` 也能用，但那时上传失败可能只体现在
+      # 附件数上（而 `releases/tags/<tag>` 这个读取接口刚建完会返回 0 个附件的假象），
+      # 所以这里用两步 + 显式数数量，让「静默没传上去」不可能蒙混过关。
+      - name: 创建 Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            artifacts/*
+            --generate-notes
+      - name: 上传产物
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" artifacts/* --clobber --repo "${GITHUB_REPOSITORY}"
+      - name: 校验附件（数量 + 校验和文件）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets | length')
+          echo "附件数：$n"
+          gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[] | "  \(.name)\t\(.size)"'
+          [ "$n" -ge 7 ] || { echo "附件数不足（期望 6 个平台产物 + SHA256SUMS）"; exit 1; }

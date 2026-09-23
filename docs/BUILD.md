@@ -116,6 +116,40 @@ jobs:
 > [官方 runner 文档](https://docs.github.com/actions/using-github-hosted-runners)。
 > 私有仓库上 ARM runner 可能不可用，那就只能交叉编译（§3）或自建 runner。
 
+## 4b. 本仓库已经配好的 CI（直接拿产物）
+
+`.github/workflows/build.yml` 已经把上面这套矩阵落地了，**不需要你自己搭**：
+
+| 触发 | 行为 |
+|---|---|
+| 打 `v*` 标签 | 跑三平台测试 → 构建全部产物 → **发 GitHub Release**（带 SHA256SUMS） |
+| push 到 `main` | 跑测试 + 构建产物（产物在 Actions 页面的 artifacts 里，可保留 90 天） |
+| Pull Request | 只跑三平台测试 |
+| 手动 dispatch | 跑测试 + 构建产物 |
+
+产物命名对齐 Node 的 `process.platform` / `process.arch`，插件侧可以直接按名字挑：
+
+| 产物 | 内容 | 备注 |
+|---|---|---|
+| `media-bridge-darwin-universal` | Mach-O **通用二进制**（x86_64 + arm64 两个切片） | 13.1 MB；已在 CI 里 `lipo -info` 核对两个切片都在 |
+| `media-bridge-win32-x64.exe` | PE32+ x86-64 | 7.7 MB；x64 与 ARM64 Windows 都能跑（后者靠系统模拟） |
+| `media-bridge-win32-arm64.exe` | PE32+ Aarch64 | 6.4 MB；原生 ARM64 |
+| `media-bridge-linux-x64` | ELF x86-64（动态） | 11.0 MB；需要 **glibc ≥ 2.34**（Ubuntu 22.04+ / Debian 12+ / RHEL 9+） |
+| `media-bridge-linux-arm64` | ELF aarch64（动态） | 9.7 MB；同样 glibc ≥ 2.34 |
+| `media-bridge-linux-x64-musl` | ELF x86-64 **static-pie** | 11.1 MB；**完全不依赖 glibc**，Alpine / 老发行版直接跑 |
+
+取产物：
+
+```bash
+# 从 Release（推荐，长期可下载）
+gh release download v0.1.0 -R oneincase/media-bridge
+# 或直接从某次 CI 运行里取
+gh run download <run-id> -R oneincase/media-bridge
+```
+
+CI 里每个产物构建完都会在**自己的原生 runner 上冒烟测试**（`version` + `diagnose`），
+macOS 那个还会强制核对两个切片都在 —— 产物是「跑过一遍的」而不是「编译出来就发的」。
+
 ## 5. 对本项目两个消费方的实际影响
 
 **WallpaperEM（Tauri 2 + Rust）：零额外工作。**
