@@ -797,11 +797,34 @@ impl MacSession {
         self.read_dict(|p| p.shuffle_raw)
     }
 
-    /// 重新拉一次 now-playing 字典，取其中一个字段。
+    /// 重新拉一次 now-playing 字典，取其中一个字段（**helper 优先**）。
+    ///
+    /// 控制命令的「回读校验」全靠这条路径。macOS 15.4+ 上直连读恒空，不修就会出现
+    /// 「命令其实生效了、却被报成未生效」—— 实测 `seek-by +5s`：位置确实从 239.6s 跳到
+    /// 244.6s，回读却是 0.0s，回执于是写「播放器未响应快进/快退」。所以这里也走 helper，
+    /// 只把校验用得到的那几个字段（进度 / 循环 / 随机）从快照里填回来。
     fn read_dict<T: Send + 'static>(
         &self,
         pick: impl Fn(&ParsedDict) -> Option<T> + Send + 'static,
     ) -> Option<T> {
+        if super::macos_helper::available()
+            && let Ok(raw) = super::macos_helper::snapshot_blocking(false, now_ms())
+        {
+            let p = raw.now.playback;
+            let pos_s = if p.position_source == PositionSource::Unavailable {
+                None
+            } else {
+                Some(p.position_ms as f64 / 1000.0)
+            };
+            let parsed = ParsedDict {
+                elapsed_s: pos_s,
+                calculated_elapsed_s: pos_s,
+                repeat_raw: loop_to_repeat_raw(p.loop_mode),
+                shuffle_raw: p.shuffle.map(i64::from),
+                ..Default::default()
+            };
+            return pick(&parsed);
+        }
         let api = self.inner.api()?;
         // 与 snapshot_blocking 同一条前提：没注册成客户端就查不到（见 ensure_registered）
         self.inner.ensure_registered();
@@ -827,6 +850,16 @@ fn control_result(action: &str, sent: bool) -> ControlOutcome {
         ControlOutcome::ok(action)
     } else {
         ControlOutcome::rejected(action, "MediaRemote 没有 MRMediaRemoteSendCommand（无法发送传输控制）")
+    }
+}
+
+/// `LoopMode` → MediaRemote 的 `repeatMode` 原始值（校验读里把快照反推回字典语义用）。
+fn loop_to_repeat_raw(mode: LoopMode) -> Option<i64> {
+    match mode {
+        LoopMode::Off => Some(0),
+        LoopMode::Track => Some(1),
+        LoopMode::Playlist => Some(2),
+        LoopMode::Unknown => None,
     }
 }
 
