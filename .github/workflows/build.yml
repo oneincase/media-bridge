@@ -219,7 +219,8 @@ jobs:
           for f in media-bridge-darwin-universal media-bridge-linux-x64 media-bridge-linux-arm64 \
                    media-bridge-linux-x64-musl media-bridge-win32-x64.exe media-bridge-win32-arm64.exe SHA256SUMS; do
             code=$(curl -sIL -o /dev/null -w '%{http_code}' "$base/$f")
-            size=$(curl -sIL "$base/$f" | awk 'BEGIN{IGNORECASE=1} /^content-length/{l=$2} END{print l}')
+            # tr -d '\r'：HTTP 头是 CRLF，直接取 $2 会带上 \r 让整数比较报 "integer expression expected"
+  size=$(curl -sIL "$base/$f" | tr -d '\r' | awk 'BEGIN{IGNORECASE=1} /^content-length/{l=$2} END{print l}')
             printf '  %-34s HTTP %s  %s bytes\n' "$f" "$code" "$size"
             [ "$code" = "200" ] || { echo "产物不可下载：$f"; exit 1; }
             [ "${size:-0}" -gt 1000 ] || { echo "产物大小异常：$f ($size)"; exit 1; }
