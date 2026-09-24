@@ -224,8 +224,11 @@ bundle id 是 `com.apple.*`）加载并代读 —— MediaRemote 的调用发生
   走直连时也会明确写出来。
 - 代价：每次读取多一次 perl 进程启动（实测单次往返约 30ms，1s 轮询下可忽略）。
 - 发布产物仍然是**单文件**（helper 已嵌进去），消费方不用多下载东西。
-- 自行构建时先建 helper 再建主二进制：`cargo build -p media-bridge-mac-helper --release`
-  然后 `cargo build --release`（顺序反了也不报错，只是运行时退回直连，`diagnose` 会说明）。
+- 自行构建直接 `cargo build --release` 即可：helper 已声明为本 crate 的
+  macOS build-dependency，cargo 会自动先构建它、build.rs 再嵌入（此前需要
+  手工先 `-p media-bridge-mac-helper`，漏了会静默退回直连）。交叉编译时
+  helper 按 HOST 架构产出，TARGET ≠ HOST 时请用 `MB_MAC_HELPER_DYLIB`
+  显式指定目标架构的预建产物。
 
 **刻意不提供的功能**（宁可明确报「不支持」，也不给一个猜的语义）：
 

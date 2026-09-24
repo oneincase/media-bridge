@@ -12,8 +12,10 @@ publish = false
 [lib]
 name = "media_bridge_mac_helper"
 path = "src/lib.rs"
-# 只产出动态库：它由 /usr/bin/perl 用 DynaLoader 加载，不作为依赖被链接
-crate-type = ["cdylib"]
+# cdylib：被 /usr/bin/perl 用 DynaLoader 加载的产物（build.rs 嵌入主二进制）；
+# rlib：让宿主 crate 能把它声明为 build-dependency —— cargo 据此保证 helper
+# 先于主 crate 的 build.rs 构建，cdylib 会出现在 target/<profile>/deps/。
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 serde_json.workspace = true

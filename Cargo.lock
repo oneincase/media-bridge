@@ -821,6 +821,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "lofty",
+ "media-bridge-mac-helper",
  "objc2",
  "rustfft",
  "serde",

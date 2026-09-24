@@ -61,6 +61,14 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 # ── Windows：GSMTC（正在播放/传输控制）+ WASAPI loopback（系统音频）────────
 # 只开真正用到的 feature：WinRT 的 Media/Storage 与 Win32 的 WASAPI/COM
+# macOS：helper cdylib 必须先于本 crate 的 build.rs 构建好（build.rs 会在
+# target/<profile>/deps/ 找到它并嵌进主二进制，见 build.rs）。声明成
+# build-dependency 让 cargo 保证这个顺序，宿主工程无需手动先建 helper。
+# 仅按目标平台编译（交叉编译时跟随 TARGET；TARGET ≠ HOST 时请改用
+# MB_MAC_HELPER_DYLIB 显式指定预建产物）。
+[target.'cfg(target_os = "macos")'.build-dependencies]
+media-bridge-mac-helper = { path = "../media-bridge-mac-helper" }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = [
   "Foundation",
