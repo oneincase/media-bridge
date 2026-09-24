@@ -411,6 +411,9 @@ impl AudioCapture {
             self.shared.set_state(SourceState::Unavailable, "采集已被配置关闭（--no-audio）");
             return Ok(());
         }
+        // 支持 stop() 之后再次 start()（宿主的设置开关 / 看门狗重启）：
+        // stop 会置位 stopping 并 join 掉旧泵，这里复位让新后端/新泵能跑
+        self.shared.stop.store(false, Ordering::Relaxed);
         // 频谱泵先跑起来：即使后端启动失败，也有稳定的静音帧输出
         self.spawn_pump();
         #[cfg(target_os = "macos")]

@@ -296,6 +296,12 @@ impl MediaBridge {
         self.audio.start()
     }
 
+    /// 只停音频采集、保留元数据轮询（设置开关场景：用户关掉系统音频可视化，
+    /// 但「正在播放」仍需继续）。再次 [`MediaBridge::ensure_audio`] 可重新启动。
+    pub fn stop_audio(&self) {
+        self.audio.stop();
+    }
+
     pub fn audio_status(&self) -> SourceStatus {
         self.audio.status()
     }
