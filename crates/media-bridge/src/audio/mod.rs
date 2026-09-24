@@ -48,6 +48,15 @@ pub const ANALYSIS_WINDOW: usize = 2048;
 /// 环形缓冲容量（样本数）。按最高 48kHz 算约 0.68s，远大于分析窗口。
 pub const RING_CAPACITY: usize = 1 << 15;
 
+/// 频谱与 PCM 共用同一份降采样窗口（见音频泵里的 `ds_window` 注释），所以分析器的
+/// 频率口径必须与这里的输出率一致 —— 曾经两边不一致（分析器按 48 kHz 标称、实际
+/// 喂 16 kHz）：所有频段低 3 倍，第 0 段落进 15.6~23 Hz 的不可听区，按第 0 段取值的
+/// 音谱组件（2902406982 三角漏斗填充）恒静止。改动任一常量时这条断言会拦下来。
+const _: () = assert!(
+    crate::spectrum::ANALYSIS_RATE == OUTPUT_RATE,
+    "spectrum::ANALYSIS_RATE 必须等于 audio::OUTPUT_RATE（频谱分析的就是降采样后的窗口）"
+);
+
 /// 采集配置。
 #[derive(Debug, Clone)]
 pub struct AudioConfig {

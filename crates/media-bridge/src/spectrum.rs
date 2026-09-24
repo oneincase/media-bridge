@@ -7,6 +7,21 @@
 //!
 //! 分箱是**二次分布**（低频密、高频疏）——音乐的能量集中在中低频，线性分箱会让
 //! 前几段挤成一团、后面全黑。
+//!
+//! ## 频率口径（2026-09-24 修正）
+//!
+//! 本分析器的输入**恒为 `ANALYSIS_RATE` = 16 kHz**：音频管线把设备采样率统一
+//! 降采样后再算频谱与 PCM（见 `audio` 模块的 `OUTPUT_RATE`，两边必须一致）。
+//! 于是 bin 宽 = `ANALYSIS_RATE / FFT_N`，频段边界也必须按这个口径算。
+//!
+//! 旧代码把输入当 48 kHz（`FFT_N=2048`「48kHz 下约 43ms」、`USABLE_RATIO`
+//! 「截到约 16kHz@48k」），实际喂 16 kHz ⇒ **所有频段比标称低 3 倍**：
+//! 第 0 段落在 2..2 bin = 15.6..23.4 Hz 的不可听区间，音乐里能量为零。
+//! 后果是所有「按第 0 段取值」的音谱组件恒静止——2902406982 的三角漏斗填充
+//! （`Simple_Audio_Bars` 的 `Bar Count=1` ⇒ `frequency = 0` ⇒ 只采第 0 段）底部
+//! 永远不填充、偶发次声噪声才闪一下。现在按真实口径取：`FFT_N=1024`
+//! （16 kHz → bin 15.625 Hz、窗长 64 ms，与 dsh 老实现同参数）、起点
+//! `BIN_LO=2` = 31.25 Hz（跳过 DC 与 20-30 Hz 次声），最高约 5.7 kHz。
 
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
@@ -14,13 +29,16 @@ use std::sync::Arc;
 
 use crate::types::SPECTRUM_BANDS;
 
-/// FFT 窗口长度（2048 点：48kHz 下约 43ms，兼顾时间分辨率与低频分辨率）。
-pub const FFT_N: usize = 2048;
+/// 分析输入采样率（= 音频管线降采样后的 `audio::OUTPUT_RATE`）。
+/// 改这里必须同步改 `audio::OUTPUT_RATE`（`audio` 模块有 const 断言盯着）。
+pub const ANALYSIS_RATE: u32 = 16_000;
+/// FFT 窗口长度（1024 点 @16 kHz → 64 ms、bin 15.625 Hz）。
+pub const FFT_N: usize = 1024;
 /// 与旧实现一致的静音下限（dB）：低于它一律算 0。
 const DB_FLOOR: f32 = -70.0;
-/// 分箱起点（跳过 DC 与超低频噪声）。
+/// 分箱起点（跳过 DC 与次声噪声）：@16k/1024 = 31.25 Hz，音乐最底的低音区。
 const BIN_LO: usize = 2;
-/// 用到的高频比例：截到约 16kHz@48k，更高频段能量极微。
+/// 用到的高频比例：截到约 5.7 kHz（16 kHz 输入的可用上限），更高频段能量极微。
 const USABLE_RATIO: f64 = 0.72;
 
 /// 复用的频谱分析器（内部持有 FFT plan 与临时缓冲，避免每帧分配）。
@@ -176,7 +194,7 @@ mod tests {
     fn one_khz_tone_lands_in_expected_band() {
         let mut a = SpectrumAnalyzer::new();
         let mut bands = [0u8; SPECTRUM_BANDS];
-        let sig = tone(1000.0, 48000.0, FFT_N, 1.0);
+        let sig = tone(1000.0, ANALYSIS_RATE as f64, FFT_N, 1.0);
         let stats = a.analyze(&sig, &mut bands);
         let max_band = bands
             .iter()
@@ -184,15 +202,42 @@ mod tests {
             .max_by_key(|(_, v)| *v)
             .map(|(i, _)| i)
             .unwrap();
-        // 1000Hz @48k → bin 42.67 → 二次分箱落在第 15 段
-        assert_eq!(max_band, 15, "1kHz 应落在第 15 段，实际 {max_band}（bands={bands:?}）");
+        // 1000Hz @16k → bin 64 → 二次分箱落在第 26 段
+        assert_eq!(max_band, 26, "1kHz 应落在第 26 段，实际 {max_band}（bands={bands:?}）");
         assert!(
-            bands[15] > 180,
-            "满幅正弦的第 15 段应接近满格，实际 {}",
-            bands[15]
+            bands[26] > 180,
+            "满幅正弦的第 26 段应接近满格，实际 {}",
+            bands[26]
         );
         assert!(stats.input_peak > 0.9 && stats.input_peak <= 1.0);
         assert!(stats.rms > 0.5, "满幅正弦 RMS 应明显大于 0，实际 {}", stats.rms);
+    }
+
+    /// 第 0 段必须落在**可听的低音区**：按第 0 段取值的音谱组件（`Bar Count=1` 的
+    /// 漏斗填充等）只有在这里才有能量可跟。曾按 48 kHz 标称算边界，实际输入 16 kHz，
+    /// 第 0 段落到 15.6..23.4 Hz，音乐里恒 0（2902406982 底部不填充）。
+    #[test]
+    fn bass_tone_reaches_band_zero() {
+        let mut a = SpectrumAnalyzer::new();
+        let mut bands = [0u8; SPECTRUM_BANDS];
+        // 40Hz @16k → bin 2.56 → 第 0 段（31.25..46.9 Hz）
+        a.analyze(&tone(40.0, ANALYSIS_RATE as f64, FFT_N, 0.5), &mut bands);
+        assert!(
+            bands[0] > 60,
+            "40Hz 必须点亮第 0 段，实际 {}（bands={bands:?}）",
+            bands[0]
+        );
+    }
+
+    /// 负控：高频不得点亮第 0 段（否则上位「40Hz 点亮第 0 段」可能只是全段一起亮）。
+    /// 注意不能用次声（如 18 Hz）做负控：64 ms 窗在低频的主瓣约 4 bin（±31 Hz），
+    /// 次声泄漏进第 0 段是窗函数的物理结果，不是缺陷。
+    #[test]
+    fn high_tone_does_not_light_band_zero() {
+        let mut a = SpectrumAnalyzer::new();
+        let mut bands = [0u8; SPECTRUM_BANDS];
+        a.analyze(&tone(1000.0, ANALYSIS_RATE as f64, FFT_N, 0.5), &mut bands);
+        assert_eq!(bands[0], 0, "1kHz 不该点亮第 0 段（bands={bands:?}）");
     }
 
     #[test]
@@ -200,15 +245,15 @@ mod tests {
         let mut a = SpectrumAnalyzer::new();
         let mut low = [0u8; SPECTRUM_BANDS];
         let mut high = [0u8; SPECTRUM_BANDS];
-        a.analyze(&tone(100.0, 48000.0, FFT_N, 1.0), &mut low);
-        a.analyze(&tone(8000.0, 48000.0, FFT_N, 1.0), &mut high);
+        a.analyze(&tone(100.0, ANALYSIS_RATE as f64, FFT_N, 1.0), &mut low);
+        a.analyze(&tone(4000.0, ANALYSIS_RATE as f64, FFT_N, 1.0), &mut high);
         let argmax = |b: &[u8; SPECTRUM_BANDS]| {
             b.iter().enumerate().max_by_key(|(_, v)| *v).map(|(i, _)| i).unwrap()
         };
         let lo_band = argmax(&low);
         let hi_band = argmax(&high);
         assert!(lo_band < 8, "100Hz 应在低频段，实际第 {lo_band} 段");
-        assert!(hi_band > 40, "8kHz 应在高频段，实际第 {hi_band} 段");
+        assert!(hi_band > 40, "4kHz 应在高频段，实际第 {hi_band} 段");
         assert!(lo_band < hi_band);
     }
 
@@ -231,7 +276,7 @@ mod tests {
         let mut a = SpectrumAnalyzer::new();
         let mut bands = [0u8; SPECTRUM_BANDS];
         // 超范围输入（削波）不应 panic，也不该溢出
-        let hot = tone(440.0, 48000.0, FFT_N, 4.0);
+        let hot = tone(440.0, ANALYSIS_RATE as f64, FFT_N, 4.0);
         a.analyze(&hot, &mut bands);
         // u8 天然 <= 255：真正要验的是「没有整段饱和到 255」（削波输入也不该全亮）
         assert!(bands.iter().filter(|&&b| b == 255).count() < SPECTRUM_BANDS);

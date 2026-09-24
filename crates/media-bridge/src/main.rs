@@ -521,22 +521,36 @@ fn analyze_wav(path: &str, args: &Args) -> Result<ExitCode> {
         samples.len(),
         samples.len() as f64 / (rate as f64 * channels as f64)
     );
+    // 先把文件降到**分析口径**（16 kHz）再分帧：段号必须与实时链路一致，
+    // 否则「一段纯音稳定落在同一段」的诊断结论对不上着色器实际看到的频段
+    // （旧实现直接把文件样本按 2048 切，48 kHz 文件的段号会整体偏低）。
+    let analysis_rate = media_bridge::spectrum::ANALYSIS_RATE;
+    let mono: Vec<f32> = if rate == analysis_rate {
+        samples.clone()
+    } else {
+        let mut down = media_bridge::audio::Downsampler::new(rate, analysis_rate);
+        let mut out = Vec::with_capacity(samples.len() * analysis_rate as usize / rate as usize + 8);
+        down.push(&samples, &mut out);
+        out
+    };
     // 按窗口滑动，打印若干帧的峰值落在哪一段（对齐「一段纯音应该稳定落在同一段」）
-    let window_ms = 2048.0 / rate as f64 * 1000.0;
+    let n = media_bridge::spectrum::FFT_N;
+    let window_ms = n as f64 / analysis_rate as f64 * 1000.0;
     let mut frames = Vec::new();
     let mut offset = 0usize;
-    while offset + 2048 <= samples.len().min(2048 * 8) {
+    while offset + n <= mono.len().min(n * 8) {
         let mut bands = [0u8; media_bridge::SPECTRUM_BANDS];
-        let stats = analyzer.analyze(&samples[offset..offset + 2048], &mut bands);
+        let stats = analyzer.analyze(&mono[offset..offset + n], &mut bands);
         let peak_band = bands.iter().enumerate().max_by_key(|(_, v)| *v).map(|(i, _)| i).unwrap_or(0);
         frames.push((offset, peak_band, stats.rms, bands));
-        offset += 2048;
+        offset += n;
     }
     if let Some((_, band, rms, _)) = frames.first() {
         println!("窗口 {window_ms:.0}ms　首帧峰值段：{band}　RMS {rms:.4}");
     }
+    let at_ms = |off: usize| (off as f64 / analysis_rate as f64 * 1000.0) as u64;
     for (i, (off, band, rms, _)) in frames.iter().enumerate() {
-        println!("  帧 {i}（偏移 {}ms）峰值段 {band}　RMS {rms:.4}", (*off as f64 / rate as f64 * 1000.0) as u64);
+        println!("  帧 {i}（偏移 {}ms）峰值段 {band}　RMS {rms:.4}", at_ms(*off));
     }
     let Some((_, band, _, bands)) = frames.last().cloned() else {
         eprintln!("样本不足一个窗口");
@@ -545,7 +559,7 @@ fn analyze_wav(path: &str, args: &Args) -> Result<ExitCode> {
     if args.json {
         println!(
             "{}",
-            serde_json::json!({"peakBand": band, "bands": bands.to_vec(), "sampleRate": rate})
+            serde_json::json!({"peakBand": band, "bands": bands.to_vec(), "sampleRate": analysis_rate})
         );
     } else {
         println!("{}", render_bars(&bands, bands.iter().copied().max().unwrap_or(0)));
