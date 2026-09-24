@@ -115,6 +115,11 @@ MPShuffleType: Off = 0, Items = 1, Collections = 2
   （编译器会直接拒绝）。
 - 静音包（`AUDCLNT_BUFFERFLAGS_SILENT`）也要走一遍环形缓冲，否则写指针不前进，
   频谱泵会以为采集停了。
+- **loopback 流绑定「打开那一刻」的默认设备，切耳机/蓝牙不会自动迁移**：旧流继续在旧设备上
+  出静音，频谱看着就"死了"。采集线程每 0.5s 对比一次默认端点 ID，发现变化就停旧流、
+  在新设备上重开（混音格式跟着新设备走）；设备整个消失（蓝牙断连、拔线，流报
+  `AUDCLNT_E_DEVICE_INVALIDATED`）走同一条重开路径，1s 退避重试，设备回来或出现新默认
+  设备即自动恢复。
 
 ### 3.3 运行位置：需要在**登录的用户会话**里跑（服务模式未验证）
 
@@ -179,6 +184,12 @@ MPRIS（`org.mpris.MediaPlayer2.*`）是 Linux 桌面的事实标准，播放器
 
 另外：**「命令起来了」不等于「真的连上了采集源」**。所以启动后会等最多 2 秒确认有样本进来，
 没等到就如实报 `unavailable` 并给出排查建议 —— 把「静默采不到」变成一句明确的话。
+
+**默认输出切换要自己跟上**：`@DEFAULT_MONITOR@` 与 `stream.capture.sink` 都是在**流建立那一刻**
+解析成当时的默认 sink，之后采集流就钉死在那个 monitor 上 —— 用户切耳机/蓝牙后旧流继续在
+旧 sink 上出静音（与 Windows WASAPI loopback 同一类问题）。监视线程每 2s 查一次默认 sink
+（`pactl get-default-sink`，纯 PipeWire 用 `wpctl get-default`），发现变化就重启采集进程，
+新连接会解析到新 sink；显式 `--device` 指定源时不监视（用户自己管理采集目标）。
 
 ### 4.3 刻意不提供的功能
 
